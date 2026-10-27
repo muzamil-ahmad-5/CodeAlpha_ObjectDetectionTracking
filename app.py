@@ -11,10 +11,24 @@ import os
 import time
 import tempfile
 import psutil
+import threading
 import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# WebRTC streaming components
+try:
+    from streamlit_webrtc import (
+        webrtc_streamer,
+        VideoProcessorBase,
+        RTCConfiguration,
+        WebRtcMode
+    )
+    import av
+    HAS_WEBRTC = True
+except ImportError:
+    HAS_WEBRTC = False
 
 # Local modules
 from detector import YOLODetector, CLASS_PRESETS, COCO_CLASSES
@@ -304,6 +318,56 @@ def sidebar_configuration():
     }
 
 
+if HAS_WEBRTC:
+    class YOLOVideoProcessor(VideoProcessorBase):
+        """WebRTC Video Processor for real-time continuous YOLO detection & tracking frames."""
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.detector = None
+            self.tracker = None
+            self.config = {}
+
+        def update_params(self, config: dict, detector):
+            with self.lock:
+                self.config = config
+                self.detector = detector
+                if self.tracker is None:
+                    self.tracker = ObjectTracker(
+                        tracker_type=config.get("tracker_file", "bytetrack.yaml"),
+                        trail_length=config.get("trail_length", 15)
+                    )
+
+        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+            img = frame.to_ndarray(format="bgr24")
+            if self.detector is None or self.detector.model is None:
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+            with self.lock:
+                try:
+                    active_tracks = self.tracker.update_with_yolo(
+                        yolo_model=self.detector.model,
+                        frame=img,
+                        conf_threshold=self.config.get("conf_threshold", 0.35),
+                        iou_threshold=self.config.get("iou_threshold", 0.50),
+                        selected_classes=self.config.get("selected_classes"),
+                        device=self.detector.device
+                    )
+
+                    annotated = self.tracker.draw_annotations(
+                        frame=img,
+                        active_tracks=active_tracks,
+                        show_boxes=self.config.get("show_boxes", True),
+                        show_labels=self.config.get("show_labels", True),
+                        show_conf=self.config.get("show_conf", True),
+                        show_tracks=self.config.get("show_tracks", True),
+                        show_trails=self.config.get("show_trails", True),
+                        show_counts_hud=self.config.get("show_counts_hud", True)
+                    )
+                    return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+                except Exception:
+                    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+
 def run_live_webcam_stream(config: dict):
     """Executes real-time object detection and tracking directly from browser webcam, hardware USB webcam, or RTSP stream."""
     st.markdown("#### 📹 Real Camera / Live Webcam Stream")
@@ -311,15 +375,55 @@ def run_live_webcam_stream(config: dict):
     cam_interface = st.radio(
         "Choose Camera Interface Mode:",
         [
-            "🌐 Browser Webcam (Cloud & Mobile Compatible)",
-            "🖥️ Local USB / RTSP Stream (Localhost PC Only)"
+            "🔴 Continuous Live WebRTC Stream (Real-Time 30 FPS - Browser/Cloud)",
+            "📸 Single-Frame Browser Snapshot",
+            "🖥️ Direct Local USB / RTSP Stream (Localhost PC Only)"
         ],
         horizontal=True,
-        help="Use 'Browser Webcam' when running on Streamlit Community Cloud or accessing from mobile/remote devices."
+        help="Use 'Continuous Live WebRTC' for real-time video streaming directly from your browser on Streamlit Cloud."
     )
 
-    if cam_interface == "🌐 Browser Webcam (Cloud & Mobile Compatible)":
-        st.info("💡 **Browser Client Camera**: Directly captures live camera frames from your device through your web browser (via HTML5/WebRTC) and analyzes them with YOLO in real time.")
+    if cam_interface == "🔴 Continuous Live WebRTC Stream (Real-Time 30 FPS - Browser/Cloud)":
+        if not HAS_WEBRTC:
+            st.error("⚠️ `streamlit-webrtc` is not installed. Please run `pip install streamlit-webrtc av`.")
+            return
+
+        st.info("💡 **Continuous Live WebRTC Streaming**: Click **START** below to begin real-time live video tracking. Your browser streams frames directly to YOLO, rendering persistent IDs, trajectories, and class counts smoothly in real time!")
+
+        try:
+            with st.spinner(f"Preparing {config['model_weights']}..."):
+                detector = load_cached_detector(config["model_weights"])
+        except Exception as e:
+            st.error(f"❌ Failed to load YOLO Model: {e}")
+            return
+
+        rtc_config = RTCConfiguration(
+            {
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {"urls": ["stun:stun1.l.google.com:19302"]},
+                    {"urls": ["stun:stun2.l.google.com:19302"]},
+                    {"urls": ["stun:stun3.l.google.com:19302"]}
+                ]
+            }
+        )
+
+        webrtc_ctx = webrtc_streamer(
+            key="live-yolo-webrtc-stream",
+            mode=WebRtcMode.SENDRECV,
+            rtc_configuration=rtc_config,
+            video_processor_factory=YOLOVideoProcessor,
+            media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
+            async_processing=True
+        )
+
+        if webrtc_ctx.video_processor:
+            webrtc_ctx.video_processor.update_params(config, detector)
+
+        return
+
+    if cam_interface == "📸 Single-Frame Browser Snapshot":
+        st.info("💡 **Browser Client Camera**: Directly captures a high-resolution photo from your device camera and analyzes all objects with YOLO.")
         camera_img = st.camera_input("📸 Take a camera snapshot to analyze & track:")
         if camera_img is not None:
             bytes_data = camera_img.getvalue()
