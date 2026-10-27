@@ -305,9 +305,86 @@ def sidebar_configuration():
 
 
 def run_live_webcam_stream(config: dict):
-    """Executes real-time object detection and tracking directly from hardware webcam or IP camera."""
+    """Executes real-time object detection and tracking directly from browser webcam, hardware USB webcam, or RTSP stream."""
     st.markdown("#### 📹 Real Camera / Live Webcam Stream")
-    st.caption("Live streaming directly from your computer's built-in webcam, external USB camera, or RTSP stream.")
+
+    cam_interface = st.radio(
+        "Choose Camera Interface Mode:",
+        [
+            "🌐 Browser Webcam (Cloud & Mobile Compatible)",
+            "🖥️ Local USB / RTSP Stream (Localhost PC Only)"
+        ],
+        horizontal=True,
+        help="Use 'Browser Webcam' when running on Streamlit Community Cloud or accessing from mobile/remote devices."
+    )
+
+    if cam_interface == "🌐 Browser Webcam (Cloud & Mobile Compatible)":
+        st.info("💡 **Browser Client Camera**: Directly captures live camera frames from your device through your web browser (via HTML5/WebRTC) and analyzes them with YOLO in real time.")
+        camera_img = st.camera_input("📸 Take a camera snapshot to analyze & track:")
+        if camera_img is not None:
+            bytes_data = camera_img.getvalue()
+            cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+
+            try:
+                with st.spinner(f"Analyzing snapshot with {config['model_weights']}..."):
+                    detector = load_cached_detector(config["model_weights"])
+                    tracker = ObjectTracker(
+                        tracker_type=config["tracker_file"],
+                        trail_length=config["trail_length"]
+                    )
+                    t0 = time.time()
+                    active_tracks = tracker.update_with_yolo(
+                        yolo_model=detector.model,
+                        frame=cv2_img,
+                        conf_threshold=config["conf_threshold"],
+                        iou_threshold=config["iou_threshold"],
+                        selected_classes=config["selected_classes"],
+                        device=detector.device
+                    )
+                    dt = time.time() - t0
+                    fps = 1.0 / dt if dt > 0 else 30.0
+
+                    annotated = tracker.draw_annotations(
+                        frame=cv2_img,
+                        active_tracks=active_tracks,
+                        show_boxes=config["show_boxes"],
+                        show_labels=config["show_labels"],
+                        show_conf=config["show_conf"],
+                        show_tracks=config["show_tracks"],
+                        show_trails=config["show_trails"],
+                        show_counts_hud=config["show_counts_hud"],
+                        fps=fps
+                    )
+
+                col1, col2 = st.columns([3, 2])
+                with col1:
+                    st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), caption="🎯 YOLO Detection & Tracking Result", use_container_width=True)
+                with col2:
+                    st.markdown("#### 📊 Detections Summary")
+                    counts = tracker.get_frame_class_counts(active_tracks)
+                    if counts:
+                        pills_html = "".join([
+                            f"<span class='class-pill'>{cls_name}: <strong>{cnt}</strong></span>"
+                            for cls_name, cnt in sorted(counts.items())
+                        ])
+                        st.markdown(f"<div>{pills_html}</div>", unsafe_allow_html=True)
+                    else:
+                        st.info("No target objects detected in this snapshot. Try adjusting confidence threshold or classes in the sidebar.")
+                    st.markdown("---")
+                    st.markdown(
+                        f"""
+                        - **Inference Time:** `{dt*1000:.1f} ms` ({fps:.1f} FPS)
+                        - **Objects Detected:** `{len(active_tracks)}`
+                        - **Hardware Device:** `{detector.device.upper()}`
+                        - **Model Weights:** `{config['model_weights']}`
+                        """
+                    )
+            except Exception as e:
+                st.error(f"❌ Analysis error: {e}")
+        return
+
+    # Direct Local USB / RTSP Stream
+    st.caption("Direct low-latency OpenCV video capture from a physical hardware webcam plugged into the machine running Python, or a network RTSP stream.")
 
     col_cam1, col_cam2, col_cam3 = st.columns([2, 2, 2])
     with col_cam1:
@@ -372,7 +449,13 @@ def run_live_webcam_stream(config: dict):
 
         cap = open_camera_capture(camera_source, width=res_w, height=res_h)
         if cap is None or not cap.isOpened():
-            st.error("❌ Could not connect to camera device. Verify that your webcam is plugged in and not in use by another application (e.g., Zoom, Teams, Camera app).")
+            st.error("❌ Could not connect to a local hardware camera device.")
+            st.warning(
+                "🌐 **Are you accessing this app via Streamlit Cloud?**\n\n"
+                "Cloud servers in remote data centers do not have physical USB webcams attached.\n\n"
+                "👉 **To use your device's camera online**, switch to the **'🌐 Browser Webcam (Cloud & Mobile Compatible)'** mode above!\n\n"
+                "👉 Or if testing on your local machine, run `streamlit run app.py` on your computer for direct hardware camera access."
+            )
             st.session_state["camera_streaming"] = False
             return
 
