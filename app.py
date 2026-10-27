@@ -388,7 +388,17 @@ def run_live_webcam_stream(config: dict):
             st.error("⚠️ `streamlit-webrtc` is not installed. Please run `pip install streamlit-webrtc av`.")
             return
 
-        st.info("💡 **Continuous Live WebRTC Streaming**: Click **START** below to begin real-time live video tracking. Your browser streams frames directly to YOLO, rendering persistent IDs, trajectories, and class counts smoothly in real time!")
+        st.markdown(
+            """
+            <div style="background: rgba(56, 189, 248, 0.1); border-left: 4px solid #38bdf8; padding: 14px; border-radius: 8px; margin-bottom: 15px;">
+                <h5 style="margin: 0 0 6px 0; color: #38bdf8;">🔴 Live WebRTC Video Streaming</h5>
+                <p style="margin: 0; color: #cbd5e1; font-size: 0.92rem;">
+                    Click <strong>START</strong> below and allow browser camera permissions. Video is streamed in real time to YOLO with bounding boxes and trajectories drawn continuously.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
         try:
             with st.spinner(f"Preparing {config['model_weights']}..."):
@@ -397,13 +407,17 @@ def run_live_webcam_stream(config: dict):
             st.error(f"❌ Failed to load YOLO Model: {e}")
             return
 
+        # Multi-redundant public STUN servers for robust NAT / firewall traversal
         rtc_config = RTCConfiguration(
             {
                 "iceServers": [
                     {"urls": ["stun:stun.l.google.com:19302"]},
                     {"urls": ["stun:stun1.l.google.com:19302"]},
                     {"urls": ["stun:stun2.l.google.com:19302"]},
-                    {"urls": ["stun:stun3.l.google.com:19302"]}
+                    {"urls": ["stun:stun3.l.google.com:19302"]},
+                    {"urls": ["stun:stun4.l.google.com:19302"]},
+                    {"urls": ["stun:stun.cloudflare.com:3478"]},
+                    {"urls": ["stun:stun.services.mozilla.com:3478"]}
                 ]
             }
         )
@@ -413,13 +427,30 @@ def run_live_webcam_stream(config: dict):
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=rtc_config,
             video_processor_factory=YOLOVideoProcessor,
-            media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 480, "max": 640},
+                    "height": {"ideal": 360, "max": 480},
+                    "frameRate": {"ideal": 15, "max": 30}
+                },
+                "audio": False
+            },
+            video_html_attrs={
+                "autoPlay": True,
+                "controls": False,
+                "style": {"width": "100%", "borderRadius": "8px"},
+                "muted": True
+            },
             async_processing=True
         )
 
         if webrtc_ctx.video_processor:
             webrtc_ctx.video_processor.update_params(config, detector)
 
+        st.caption(
+            "⚠️ **Troubleshooting 'Network Problem'?** WebRTC requires open UDP ports. If your local Wi-Fi, cellular provider, or VPN blocks WebRTC UDP connections, "
+            "select **📸 Single-Frame Browser Snapshot** above, or run `streamlit run app.py` on your computer for zero-lag hardware streaming."
+        )
         return
 
     if cam_interface == "📸 Single-Frame Browser Snapshot":
